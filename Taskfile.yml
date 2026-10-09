@@ -4,6 +4,7 @@ vars:
   BINARY_NAME: sqlite-mcp
   BUILD_DIR: build
   MAIN_PATH: cmd/server/main.go
+  EXE_EXT: '{{if eq OS "windows"}}.exe{{end}}'
 
 tasks:
   fmt:
@@ -50,7 +51,7 @@ tasks:
     desc: Build the binary
     deps: [build-example-db]
     cmds:
-      - go build -o {{.BUILD_DIR}}/{{.BINARY_NAME}} {{.MAIN_PATH}}
+      - go build -o {{.BUILD_DIR}}/{{.BINARY_NAME}}{{.EXE_EXT}} {{.MAIN_PATH}}
 
   docker-build:
     desc: Build Docker image
