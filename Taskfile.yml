@@ -44,7 +44,7 @@ tasks:
     desc: Run from source with example db
     deps: [check, build-example-db]
     cmds:
-      - go run {{.MAIN_PATH}} --database {{.BUILD_DIR}}/example.db
+      - go run {{.MAIN_PATH}}
 
   build:
     desc: Build the binary

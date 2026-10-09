@@ -3,132 +3,144 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/rvarun11/sqlite-mcp/internal/models"
 	"github.com/rvarun11/sqlite-mcp/internal/repository"
-	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 )
 
 type MCPHandler struct {
-	repo   *repository.SQLiteDB
-	logger *zap.SugaredLogger
+	manager *repository.Manager
+	logger  *zap.SugaredLogger
 }
 
-func NewMCPHandler(repo *repository.SQLiteDB, logger *zap.SugaredLogger) *MCPHandler {
+func NewMCPHandler(manager *repository.Manager, logger *zap.SugaredLogger) *MCPHandler {
 	return &MCPHandler{
-		repo:   repo,
-		logger: logger,
+		manager: manager,
+		logger:  logger,
 	}
 }
 
 func (h *MCPHandler) GetSchema(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	h.logger.Info("Handling listTables request")
+	h.logger.Info("Handling get_schema request")
 
-	tables, err := h.repo.GetSchema()
-	if err != nil {
-		h.logger.Error("Failed to list tables", err)
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{
-				&mcp.TextContent{
-					Type: "text",
-					Text: "Failed to retrieve table information. Please check your database connection.",
-				},
-			},
-		}, nil
+	dbPath, ok := databaseArgument(request)
+	if !ok {
+		return errorResult("Database parameter is required"), nil
 	}
 
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{
-				Type: "text",
-				Text: formatTablesResponse(tables),
-			},
-		},
-	}, nil
+	db, err := h.manager.Get(dbPath)
+	if err != nil {
+		h.logger.Error("Failed to open database: ", err)
+		return errorResult(fmt.Sprintf("Failed to open database: %v", err)), nil
+	}
+
+	tables, err := db.GetSchema()
+	if err != nil {
+		h.logger.Error("Failed to list tables", err)
+		return errorResult("Failed to retrieve table information. Please check your database connection."), nil
+	}
+
+	return textResult(formatTablesResponse(tables)), nil
 }
 
 func (h *MCPHandler) Query(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	h.logger.Info("Handling queryDatabase request")
+	h.logger.Info("Handling query request")
 
-	sql, ok := request.Params.Arguments.(map[string]any)["sql"].(string)
-	if !ok || sql == "" {
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{
-				&mcp.TextContent{
-					Type: "text",
-					Text: "SQL query parameter is required",
-				},
-			},
-		}, nil
+	dbPath, ok := databaseArgument(request)
+	if !ok {
+		return errorResult("Database parameter is required"), nil
 	}
 
-	result, err := h.repo.Query(sql)
+	sql, ok := stringArgument(request, "sql")
+	if !ok || sql == "" {
+		return errorResult("SQL query parameter is required"), nil
+	}
+
+	db, err := h.manager.Get(dbPath)
+	if err != nil {
+		h.logger.Error("Failed to open database: ", err)
+		return errorResult(fmt.Sprintf("Failed to open database: %v", err)), nil
+	}
+
+	result, err := db.Query(sql)
 	if err != nil {
 		h.logger.Error("Query execution failed: ", err)
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{
-				&mcp.TextContent{
-					Type: "text",
-					Text: "Query execution failed. Please check your SQL syntax and try again.",
-				},
-			},
-		}, nil
+		return errorResult("Query execution failed. Please check your SQL syntax and try again."), nil
 	}
 
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{
-				Type: "text",
-				Text: formatQueryResponse(result),
-			},
-		},
-	}, nil
+	return textResult(formatQueryResponse(result)), nil
 }
 
 func (h *MCPHandler) Execute(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	h.logger.Info("Handling executeDatabase request")
+	h.logger.Info("Handling execute request")
 
-	sql, ok := request.Params.Arguments.(map[string]any)["sql"].(string)
+	dbPath, ok := databaseArgument(request)
 	if !ok {
-		// handle error - sql argument missing or not a string
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{
-				&mcp.TextContent{
-					Type: "text",
-					Text: "Missing or invalid 'sql' argument",
-				},
-			},
-		}, nil
+		return errorResult("Database parameter is required"), nil
 	}
 
-	result, err := h.repo.Execute(sql)
+	sql, ok := stringArgument(request, "sql")
+	if !ok {
+		return errorResult("Missing or invalid 'sql' argument"), nil
+	}
+
+	db, err := h.manager.Get(dbPath)
+	if err != nil {
+		h.logger.Error("Failed to open database: ", err)
+		return errorResult(fmt.Sprintf("Failed to open database: %v", err)), nil
+	}
+
+	result, err := db.Execute(sql)
 	if err != nil {
 		h.logger.Error("Statement execution failed: ", err)
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{
-				&mcp.TextContent{
-					Type: "text",
-					Text: "Statement execution failed. Please check your SQL syntax and try again.",
-				},
-			},
-		}, nil
+		return errorResult("Statement execution failed. Please check your SQL syntax and try again."), nil
 	}
 
+	return textResult(formatExecuteResponse(result)), nil
+}
+
+// databaseArgument reads the required "database" argument from the tool call.
+func databaseArgument(request mcp.CallToolRequest) (string, bool) {
+	return stringArgument(request, "database")
+}
+
+func stringArgument(request mcp.CallToolRequest, name string) (string, bool) {
+	args, ok := request.Params.Arguments.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	value, ok := args[name].(string)
+	if !ok || value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func textResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
 			&mcp.TextContent{
 				Type: "text",
-				Text: formatExecuteResponse(result),
+				Text: text,
 			},
 		},
-	}, nil
+	}
+}
+
+func errorResult(text string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		IsError: true,
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Type: "text",
+				Text: text,
+			},
+		},
+	}
 }
 
 // Helper functions for formatting responses

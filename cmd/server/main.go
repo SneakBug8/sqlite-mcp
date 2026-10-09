@@ -17,23 +17,15 @@ import (
 	"syscall"
 )
 
-var dbPath string
-
 func main() {
 	var rootCmd = &cobra.Command{
 		Use:   "sqlite-mcp",
 		Short: "SQLite MCP Server - A Model Context Protocol server for SQLite operations",
-		Long:  `SQLite MCP Server provides a standardized interface for SQLite database operations through the Model Context Protocol (MCP). It supports schema introspection, query execution, and database modifications.`,
+		Long:  `SQLite MCP Server provides a standardized interface for SQLite database operations through the Model Context Protocol (MCP). It supports schema introspection, query execution, and database modifications. Each tool call selects the database to explore with the required "database" argument.`,
 		Run:   runServer,
 	}
 
-	rootCmd.Flags().StringVarP(&dbPath, "database", "d", "", "Path to SQLite database file (required)")
 	rootCmd.Flags().Bool("debug", false, "Enable debug mode")
-
-	err := rootCmd.MarkFlagRequired("database")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marking database flag as required: %v\n", err)
-	}
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -57,26 +49,28 @@ func runServer(cmd *cobra.Command, args []string) {
 	}
 	defer syncLogger(logger)
 
-	logger.Infof("Starting SQLite MCP Server: %v", dbPath)
+	logger.Info("Starting SQLite MCP Server")
 
-	// Initialize database
-	repo, err := repository.NewSQLiteDB(cfg.DatabasePath, logger)
-	if err != nil {
-		logger.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer repo.Close()
+	// Initialize database connection manager
+	manager := repository.NewManager(logger)
+	defer manager.Close()
 
 	// Initialize MCP handler
-	mcpHandler := handlers.NewMCPHandler(repo, logger)
+	mcpHandler := handlers.NewMCPHandler(manager, logger)
 
 	mcpServer := server.NewMCPServer(
 		"sqlite-mcp",
 		"1.0.0",
 	)
 
-	// Get Schema Tool - No parameters needed
+	// Get Schema Tool
 	listTablesTool := mcp.NewTool("get_schema",
-		mcp.WithDescription("List all tables in the SQLite database with their schema information including columns, types, constraints, and indexes"),
+		mcp.WithDescription("List all tables in a SQLite database with their schema information including columns, types, constraints, and indexes. Select the database with the required 'database' argument."),
+		mcp.WithString("database",
+			mcp.Required(),
+			mcp.Description("Path to the SQLite database file to explore"),
+			mcp.MinLength(1),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -85,7 +79,12 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	// Query Database Tool
 	queryDatabaseTool := mcp.NewTool("query",
-		mcp.WithDescription("Execute SELECT queries against the SQLite database. Only SELECT, WITH, and EXPLAIN queries are allowed."),
+		mcp.WithDescription("Execute SELECT queries against a SQLite database. Only SELECT, WITH, and EXPLAIN queries are allowed. Select the database with the required 'database' argument."),
+		mcp.WithString("database",
+			mcp.Required(),
+			mcp.Description("Path to the SQLite database file to explore"),
+			mcp.MinLength(1),
+		),
 		mcp.WithString("sql",
 			mcp.Required(),
 			mcp.Description("SQL SELECT query to execute"),
@@ -100,7 +99,12 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	// Execute Database Tool
 	executeDatabaseTool := mcp.NewTool("execute",
-		mcp.WithDescription("Execute DDL/DML operations (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, etc.) against the SQLite database. SELECT queries are not allowed - use queryDatabase instead."),
+		mcp.WithDescription("Execute DDL/DML operations (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, etc.) against a SQLite database. SELECT queries are not allowed - use query instead. Select the database with the required 'database' argument."),
+		mcp.WithString("database",
+			mcp.Required(),
+			mcp.Description("Path to the SQLite database file to explore"),
+			mcp.MinLength(1),
+		),
 		mcp.WithString("sql",
 			mcp.Required(),
 			mcp.Description("SQL statement to execute (non-SELECT operations only)"),

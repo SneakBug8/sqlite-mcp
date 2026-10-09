@@ -11,7 +11,7 @@ import (
 	"github.com/rvarun11/sqlite-mcp/internal/repository"
 )
 
-func setupTestMCPHandler(t *testing.T) (*MCPHandler, func()) {
+func setupTestMCPHandler(t *testing.T) (*MCPHandler, string, func()) {
 	// Create temporary database file
 	tmpfile, err := os.CreateTemp("", "test_mcp_*.db")
 	if err != nil {
@@ -19,8 +19,8 @@ func setupTestMCPHandler(t *testing.T) (*MCPHandler, func()) {
 	}
 	tmpfile.Close()
 
-	logger := logger.NewTestLogger()
-	repo, err := repository.NewSQLiteDB(tmpfile.Name(), logger)
+	log := logger.NewTestLogger()
+	repo, err := repository.NewSQLiteDB(tmpfile.Name(), log)
 	if err != nil {
 		t.Fatalf("Failed to initialize test database: %v", err)
 	}
@@ -78,24 +78,31 @@ func setupTestMCPHandler(t *testing.T) (*MCPHandler, func()) {
 		t.Fatalf("Failed to insert test data: %v", err)
 	}
 
-	handler := NewMCPHandler(repo, logger)
+	// Release the setup connection; the handler manager opens its own.
+	repo.Close()
+
+	manager := repository.NewManager(log)
+	handler := NewMCPHandler(manager, log)
 
 	cleanup := func() {
-		repo.Close()
+		manager.Close()
 		os.Remove(tmpfile.Name())
 	}
 
-	return handler, cleanup
+	return handler, tmpfile.Name(), cleanup
 }
 
 func TestMCPHandler_GetSchema(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	request := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "get_schema",
+			Arguments: map[string]any{
+				"database": dbPath,
+			},
 		},
 	}
 
@@ -144,8 +151,72 @@ func TestMCPHandler_GetSchema(t *testing.T) {
 	}
 }
 
+func TestMCPHandler_GetSchema_MissingDatabase(t *testing.T) {
+	handler, _, cleanup := setupTestMCPHandler(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      "get_schema",
+			Arguments: map[string]any{},
+		},
+	}
+
+	result, err := handler.GetSchema(ctx, request)
+	if err != nil {
+		t.Fatalf("GetSchema failed: %v", err)
+	}
+
+	if !result.IsError {
+		t.Error("Expected error result for missing database parameter")
+	}
+
+	textContent, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatal("Expected TextContent")
+	}
+
+	if !containsString(textContent.Text, "Database parameter is required") {
+		t.Error("Expected error message about missing database parameter")
+	}
+}
+
+func TestMCPHandler_GetSchema_NonexistentDatabase(t *testing.T) {
+	handler, _, cleanup := setupTestMCPHandler(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "get_schema",
+			Arguments: map[string]any{
+				"database": "does_not_exist.db",
+			},
+		},
+	}
+
+	result, err := handler.GetSchema(ctx, request)
+	if err != nil {
+		t.Fatalf("GetSchema failed: %v", err)
+	}
+
+	if !result.IsError {
+		t.Error("Expected error result for nonexistent database")
+	}
+
+	textContent, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatal("Expected TextContent")
+	}
+
+	if !containsString(textContent.Text, "Failed to open database") {
+		t.Error("Expected error message about opening the database")
+	}
+}
+
 func TestMCPHandler_Query_Success(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -153,7 +224,8 @@ func TestMCPHandler_Query_Success(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "query",
 			Arguments: map[string]any{
-				"sql": "SELECT name, email FROM users WHERE age > 25 ORDER BY name",
+				"database": dbPath,
+				"sql":      "SELECT name, email FROM users WHERE age > 25 ORDER BY name",
 			},
 		},
 	}
@@ -198,14 +270,16 @@ func TestMCPHandler_Query_Success(t *testing.T) {
 }
 
 func TestMCPHandler_Query_MissingSQL(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	request := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
-			Name:      "query",
-			Arguments: map[string]any{}, // Missing sql parameter
+			Name: "query",
+			Arguments: map[string]any{
+				"database": dbPath,
+			}, // Missing sql parameter
 		},
 	}
 
@@ -229,8 +303,8 @@ func TestMCPHandler_Query_MissingSQL(t *testing.T) {
 	}
 }
 
-func TestMCPHandler_Query_EmptySQL(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+func TestMCPHandler_Query_MissingDatabase(t *testing.T) {
+	handler, _, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -238,7 +312,41 @@ func TestMCPHandler_Query_EmptySQL(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "query",
 			Arguments: map[string]any{
-				"sql": "", // Empty SQL
+				"sql": "SELECT 1",
+			},
+		},
+	}
+
+	result, err := handler.Query(ctx, request)
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+
+	if !result.IsError {
+		t.Error("Expected error result for missing database parameter")
+	}
+
+	textContent, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatal("Expected TextContent")
+	}
+
+	if !containsString(textContent.Text, "Database parameter is required") {
+		t.Error("Expected error message about missing database parameter")
+	}
+}
+
+func TestMCPHandler_Query_EmptySQL(t *testing.T) {
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "query",
+			Arguments: map[string]any{
+				"database": dbPath,
+				"sql":      "", // Empty SQL
 			},
 		},
 	}
@@ -255,7 +363,7 @@ func TestMCPHandler_Query_EmptySQL(t *testing.T) {
 }
 
 func TestMCPHandler_Query_InvalidSQL(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -263,7 +371,8 @@ func TestMCPHandler_Query_InvalidSQL(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "query",
 			Arguments: map[string]any{
-				"sql": "SELECT * FROM nonexistent_table",
+				"database": dbPath,
+				"sql":      "SELECT * FROM nonexistent_table",
 			},
 		},
 	}
@@ -289,7 +398,7 @@ func TestMCPHandler_Query_InvalidSQL(t *testing.T) {
 }
 
 func TestMCPHandler_Execute_Success(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -297,7 +406,8 @@ func TestMCPHandler_Execute_Success(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "execute",
 			Arguments: map[string]any{
-				"sql": "INSERT INTO users (name, email, age) VALUES ('Test User', 'test@example.com', 28)",
+				"database": dbPath,
+				"sql":      "INSERT INTO users (name, email, age) VALUES ('Test User', 'test@example.com', 28)",
 			},
 		},
 	}
@@ -341,7 +451,7 @@ func TestMCPHandler_Execute_Success(t *testing.T) {
 }
 
 func TestMCPHandler_Execute_Update(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -349,7 +459,8 @@ func TestMCPHandler_Execute_Update(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "execute",
 			Arguments: map[string]any{
-				"sql": "UPDATE users SET age = 31 WHERE name = 'John Doe'",
+				"database": dbPath,
+				"sql":      "UPDATE users SET age = 31 WHERE name = 'John Doe'",
 			},
 		},
 	}
@@ -375,14 +486,16 @@ func TestMCPHandler_Execute_Update(t *testing.T) {
 }
 
 func TestMCPHandler_Execute_MissingSQL(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	request := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
-			Name:      "execute",
-			Arguments: map[string]any{}, // Missing sql parameter
+			Name: "execute",
+			Arguments: map[string]any{
+				"database": dbPath,
+			}, // Missing sql parameter
 		},
 	}
 
@@ -406,8 +519,8 @@ func TestMCPHandler_Execute_MissingSQL(t *testing.T) {
 	}
 }
 
-func TestMCPHandler_Execute_InvalidSQL(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+func TestMCPHandler_Execute_MissingDatabase(t *testing.T) {
+	handler, _, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -415,7 +528,41 @@ func TestMCPHandler_Execute_InvalidSQL(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "execute",
 			Arguments: map[string]any{
-				"sql": "INSERT INTO nonexistent_table (name) VALUES ('test')",
+				"sql": "CREATE TABLE t (id INTEGER)",
+			},
+		},
+	}
+
+	result, err := handler.Execute(ctx, request)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if !result.IsError {
+		t.Error("Expected error result for missing database parameter")
+	}
+
+	textContent, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatal("Expected TextContent")
+	}
+
+	if !containsString(textContent.Text, "Database parameter is required") {
+		t.Error("Expected error message about missing database parameter")
+	}
+}
+
+func TestMCPHandler_Execute_InvalidSQL(t *testing.T) {
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "execute",
+			Arguments: map[string]any{
+				"database": dbPath,
+				"sql":      "INSERT INTO nonexistent_table (name) VALUES ('test')",
 			},
 		},
 	}
@@ -441,7 +588,7 @@ func TestMCPHandler_Execute_InvalidSQL(t *testing.T) {
 }
 
 func TestMCPHandler_Execute_DDL(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -449,6 +596,7 @@ func TestMCPHandler_Execute_DDL(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "execute",
 			Arguments: map[string]any{
+				"database": dbPath,
 				"sql": `CREATE TABLE test_table (
                     id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL
@@ -478,7 +626,7 @@ func TestMCPHandler_Execute_DDL(t *testing.T) {
 }
 
 func TestMCPHandler_Query_WithClause(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -486,6 +634,7 @@ func TestMCPHandler_Query_WithClause(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "query",
 			Arguments: map[string]any{
+				"database": dbPath,
 				"sql": `WITH adult_users AS (
                     SELECT name, email FROM users WHERE age >= 30
                 ) SELECT * FROM adult_users ORDER BY name`,
@@ -514,7 +663,7 @@ func TestMCPHandler_Query_WithClause(t *testing.T) {
 }
 
 func TestMCPHandler_Query_Explain(t *testing.T) {
-	handler, cleanup := setupTestMCPHandler(t)
+	handler, dbPath, cleanup := setupTestMCPHandler(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -522,7 +671,8 @@ func TestMCPHandler_Query_Explain(t *testing.T) {
 		Params: mcp.CallToolParams{
 			Name: "query",
 			Arguments: map[string]any{
-				"sql": "EXPLAIN SELECT * FROM users WHERE age > 25",
+				"database": dbPath,
+				"sql":      "EXPLAIN SELECT * FROM users WHERE age > 25",
 			},
 		},
 	}

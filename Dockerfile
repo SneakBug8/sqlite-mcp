@@ -33,7 +33,9 @@ if [ -f "/data/schema.sql" ]; then
     sqlite3 "$DB_PATH" < "/data/schema.sql" 2>/dev/null || true
 fi
 
-exec sqlite-mcp-server --database "$DB_PATH" "$@"
+# The calling agent selects the database with the required "database" tool
+# argument. The example database is available at /app/database.db.
+exec sqlite-mcp-server "$@"
 EOF
 
 RUN chmod +x /app/entrypoint.sh
